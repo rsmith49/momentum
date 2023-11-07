@@ -1,5 +1,5 @@
 # momentum
-Enable your LLM app to continually learn from their success and crowdsource automatic improvements.
+Enable your LLM app to continually learn from its success and crowdsource quality improvements.
 
 ## Architecure
 
