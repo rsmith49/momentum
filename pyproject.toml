@@ -1,0 +1,17 @@
+[tool.poetry]
+name = "momentum"
+version = "0.1.0"
+description = "Enable your LLM app to continually learn from their success and crowdsource automatic improvements"
+authors = ["Ryan Smith <ryan.smith@datastax.com>"]
+license = "LICENSE"
+readme = "README.md"
+
+[tool.poetry.dependencies]
+python = "^3.8.1"
+cassio = "^0.1.3"
+langchain = "^0.0.331"
+
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
