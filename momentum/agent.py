@@ -1,7 +1,7 @@
 """An interface to the agent. Currently only supports LangChain specified LLMs"""
 # TODO: Figure out if we want to make this actually just a part of Langchain so people
 #       can drag and drop much easier - discoverability is the biggest thing we care about
-from typing import Any, Dict, Optional, Union
+from typing import Any, Dict, Optional, Type, Union
 from uuid import uuid4
 
 from langchain.embeddings.base import Embeddings
@@ -9,8 +9,8 @@ from langchain.prompts import FewShotPromptTemplate, PromptTemplate
 from langchain.schema.runnable import Runnable, RunnablePassthrough
 from langchain.schema.language_model import LanguageModelInput
 
-from .lc_utils import KeywordExampleSelector, MomentumCassandra, MomentumExamplePropagator
-from .rating import Rating
+from .lc_utils import RATING_FIELD_NAME, KeywordExampleSelector, MomentumCassandra, MomentumExampleFinder
+from .rating import Rating, ThumbRating
 from .response_example import InContextExample, ResponseExample
 
 # TODO: Infer the example format from the input prompt template
@@ -20,6 +20,7 @@ DEFAULT_EXAMPLE_TEMPLATE = PromptTemplate(
 )
 DEFAULT_VECTORSTORE_CLS = MomentumCassandra
 DEFAULT_VS_KEYSPACE = "momentum"
+DEFAULT_RATING_CLS = ThumbRating
 
 LLM_RESPONSE_KEY = "llm_response"
 PROMPT_DICT_KEY = "prompt_dict"
@@ -68,6 +69,7 @@ class AdaptiveAgent:
         table_name: Optional[str] = None,
         num_few_shot_examples: int = 4,
         num_examples_to_consider: int = 20,
+        rating_cls: Type[Rating] = DEFAULT_RATING_CLS,
         # TODO: Add param to embed query + response instead of just query
     ):
         # TODO: Logic to account for the following scenarios
@@ -100,16 +102,18 @@ class AdaptiveAgent:
 
         self.num_few_shot_examples = num_few_shot_examples
         self.num_examples_to_consider = num_examples_to_consider
+        self.rating_cls = rating_cls
 
-        self.example_propagator = MomentumExamplePropagator(
+        self.example_finder = MomentumExampleFinder(
             input_prompt_template=self._base_prompt_template,
             vectorstore=self.vectorstore,
             k=self.num_few_shot_examples,
             fetch_k=self.num_examples_to_consider,
+            rating_filter=rating_cls.get_good_examples_filter(RATING_FIELD_NAME),
         )
         self.few_shot_template = self._create_few_shot_template()
         # Create main Langchain Runnable for the agent via LCEL
-        self.pipeline = self.example_propagator | {
+        self.pipeline = self.example_finder | {
             PROMPT_DICT_KEY: RunnablePassthrough(),
             LLM_RESPONSE_KEY: self.few_shot_template | self.llm_runnable,
         }
@@ -183,13 +187,13 @@ class AdaptiveAgent:
         prompt = self._base_prompt_template.format(examples="", **query)
 
         response_example = ResponseExample(
-            id=str(uuid4()),
+            id=uuid4().hex,
             prompt=prompt,
             content=response_text,
             # TODO: Consider whether all the hacks are worth it and we actually need the examples
             in_context_examples=[
                 InContextExample(**ex_kwargs)
-                for ex_kwargs in pipeline_output[PROMPT_DICT_KEY][self.example_propagator.examples_field]
+                for ex_kwargs in pipeline_output[PROMPT_DICT_KEY][self.example_finder.examples_field]
             ],
         )
 
@@ -200,6 +204,7 @@ class AdaptiveAgent:
     def add_rating(self, example_id: str, rating: Rating) -> None:
         """Add a rating to an example
 
+        TODO: Add source of rating
         Parameters
         ----------
         example_id : str
@@ -207,4 +212,10 @@ class AdaptiveAgent:
         rating : Rating
             What to rate the example
         """
-        raise NotImplementedError
+        # TODO: Make this less hacky by accessing the internal internal table
+        self.vectorstore.table.table.put(
+            row_id=example_id,
+            metadata={
+                RATING_FIELD_NAME: rating.to_vectorstore(),
+            }
+        )

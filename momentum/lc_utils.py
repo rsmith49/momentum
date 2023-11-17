@@ -11,6 +11,8 @@ from langchain.schema.runnable import Runnable, RunnableConfig
 from langchain.vectorstores import Cassandra
 from pydantic import BaseModel
 
+from .types import SearchFilterType
+
 RATING_FIELD_NAME = "rating"
 EXAMPLE_CONTENT_FIELD_NAME = "example_content"
 DEFAULT_EXAMPLES_FIELD = "examples"
@@ -54,7 +56,7 @@ class MomentumCassandra(Cassandra):
         )
 
 
-class MomentumExamplePropagator(Runnable[Dict, Dict], BaseModel):
+class MomentumExampleFinder(Runnable[Dict, Dict], BaseModel):
     """
     Select the examples that should be used for a few-shot prompt via MMR search,
     and pass to the next link in the chain along with the original input.
@@ -64,19 +66,27 @@ class MomentumExamplePropagator(Runnable[Dict, Dict], BaseModel):
     k: int = 4
     fetch_k: int = 20
     examples_field: str = DEFAULT_EXAMPLES_FIELD
-    rating_criteria: None = None # TODO: Figure this out
+    rating_filter: SearchFilterType
+
+    def _perform_search(self, query: str) -> List[Dict[str, Any]]:
+        """Perform the search of the vectorstore
+
+        NOTE: Can be subclassed to implement other search methods
+        """
+        return self.vectorstore.max_marginal_relevance_search(
+            query=query,
+            k=self.k,
+            fetch_k=self.fetch_k,
+            filter=self.rating_filter,
+        )
 
     def select_examples(self, prompt_input: Dict[str, Any]) -> List[Dict[str, Any]]:
         """Query the vectorstore with the prompt formatted with empty examples"""
-        vs_query = self.input_prompt_template.format_prompt(
+        vs_query = self.input_prompt_template.format(
             **{self.examples_field: ""},
             **prompt_input,
         )
-        return self.vectorstore.max_marginal_relevance_search(
-            query=vs_query,
-            k=self.k,
-            fetch_k=self.fetch_k,
-        )
+        return self._perform_search(vs_query)
 
     def invoke(self, input: Dict[str, Any], config: Optional[RunnableConfig] = None) -> Dict[str, Any]:
         return {
@@ -95,4 +105,3 @@ class KeywordExampleSelector(BaseExampleSelector, BaseModel):
     def add_example(self, example: Dict[str, str]) -> Any:
         # Because of our semi-hacky workaround, this does not work
         raise NotImplementedError
-
