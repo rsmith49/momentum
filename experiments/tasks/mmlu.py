@@ -1,7 +1,7 @@
 import asyncio
 from enum import Enum
 import re
-from typing import Dict, List
+from typing import Any, Dict, List
 
 from langchain.utils.math import cosine_similarity
 from langchain.vectorstores.utils import maximal_marginal_relevance
@@ -56,16 +56,26 @@ def select_examples(
         )
 
     elif method == ExampleSelectionMethod.MOMENTUM_MMR:
-        raise NotImplementedError
+        best_indices = maximal_marginal_relevance(
+            query_embedding=np.array(row["embedding"]),
+            embedding_list=df["embedding"].tolist(),
+            k=num_examples,
+        )
+        return _df_to_icl_examples(
+            df.iloc[best_indices]
+        )
 
     elif method == ExampleSelectionMethod.MOMENTUM_SIM:
         # Can assume the current row is not in df
-        sims = cosine_similarity(row["embedding"], df["embedding"].tolist())
+        sims = cosine_similarity([row["embedding"]], df["embedding"].tolist())
         # Get indices of num_examples most similar examples
         closest_indices = sims[0].argsort()[::-1][:num_examples]
         return _df_to_icl_examples(
             df.iloc[closest_indices]
         )
+
+    else:
+        raise ValueError(f"Unknown example selection method: {method}")
 
 
 def create_user_question(row: pd.Series) -> str:
@@ -224,29 +234,6 @@ async def arun_experiment(
     ).mean()
 
 
-def run_experiment(
-    eval_df: pd.DataFrame,
-    *,
-    llm_completions: pd.Series | None = None,
-    examples_df: pd.DataFrame | None = None,
-    num_examples: int = 5,
-    example_selection_method: ExampleSelectionMethod = ExampleSelectionMethod.NONE,
-    seed: int = 123,
-):
+def run_experiment(*args: Any, **kwargs: Any):
     """Runs the MMLU experiment and returns the accuracy"""
-    if llm_completions is None:
-        loop = asyncio.get_event_loop()
-        llm_completions = loop.run_until_complete(
-            get_completions(
-                eval_df=eval_df,
-                examples_df=examples_df,
-                num_examples=num_examples,
-                example_selection_method=example_selection_method,
-                seed=seed,
-            )
-        )
-
-    return eval_df.apply(
-        lambda row: compare_mmlu_answer(row, llm_completions[row.name]),
-        axis=1,
-    ).mean()
+    return asyncio.run(arun_experiment(*args, **kwargs))

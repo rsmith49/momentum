@@ -29,6 +29,18 @@ async def async_apply(df: pd.DataFrame, fn: Callable[[pd.Series], Coroutine]) ->
     return new_col
 
 
+# def async_apply(df: pd.DataFrame, fn: Callable[[pd.Series], Coroutine]) -> pd.Series:
+#     try:
+#         loop = asyncio.get_event_loop()
+#     except RuntimeError:
+#         loop = None
+#
+#     if loop is not None and loop.is_running():
+#         return loop.run_until_complete(_async_apply(df, fn))
+#     else:
+#         return asyncio.run(_async_apply(df, fn))
+
+
 def get_embedding_apply_fn(
     create_prompt_fn: Callable[[pd.Series], str],
     model: str = "text-embedding-ada-002",
