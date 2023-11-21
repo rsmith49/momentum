@@ -6,6 +6,7 @@ from httpx import Timeout
 import openai
 import pandas as pd
 from tenacity import retry, wait_exponential
+import tiktoken
 from tqdm.asyncio import tqdm as atqdm
 
 async_openai_client: openai.AsyncOpenAI | None = None
@@ -36,7 +37,7 @@ async def async_apply(
     new_col = await atqdm.gather(
         *(wrapper(row) for ndx, row in df.iterrows())
     )
-    return new_col
+    return pd.Series(new_col, index=df.index)
 
 
 def get_embedding_apply_fn(
@@ -83,3 +84,49 @@ def get_inference_apply_fn(
         return completion_response.choices[0].message.content
 
     return async_apply_fn
+
+
+def num_tokens_for_messages(
+    messages: List[Dict[str, Any]],
+    model: str = "gpt-3.5-turbo-1106",
+) -> int:
+    """Count the number of tokens in a list of chat messages."""
+    enc = tiktoken.encoding_for_model(model)
+    num_tokens = 0
+    for msg in messages:
+        assert "content" in msg
+        if type(msg["content"]) is str:
+            num_tokens += len(enc.encode(msg["content"]))
+        elif type(msg["content"]) is list:
+            num_tokens += sum([len(enc.encode(submsg)) for submsg in msg["content"]])
+        else:
+            raise ValueError(f"Unknown message content type: {type(msg['content'])}")
+
+    return num_tokens
+
+
+# Cost per input token in USD
+MODEL_INPUT_PRICING_DICT = {
+    "gpt-3.5-turbo-1106": 0.001 / 1_000,
+    "gpt-3.5-turbo-instruct": 0.0015 / 1_000,
+    "gpt-3.5-turbo": 0.001 / 1_000,
+    "gpt-4": 0.03 / 1_000,
+    "gpt-4-1106-preview": 0.01 / 1_000,
+}
+
+MODEL_OUTPUT_PRICING_DICT = {
+    "gpt-3.5-turbo-1106": 0.002 / 1_000,
+    "gpt-3.5-turbo-instruct": 0.002 / 1_000,
+    "gpt-3.5-turbo": 0.002 / 1_000,
+    "gpt-4": 0.06 / 1_000,
+    "gpt-4-1106-preview": 0.03 / 1_000,
+}
+
+
+def cost_for_messages(
+    messages: List[Dict[str, Any]],
+    model: str = "gpt-3.5-turbo-1106",
+):
+    """Calculate the cost of a list of chat messages."""
+    num_tokens = num_tokens_for_messages(messages, model)
+    return num_tokens * MODEL_INPUT_PRICING_DICT[model]
