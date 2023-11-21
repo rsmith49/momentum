@@ -188,7 +188,7 @@ async def populate_examples(df: pd.DataFrame):
     df["ex_prompt"] = df.apply(lambda row: create_user_question(row), axis=1)
 
     if "ex_content" not in df.columns:
-        llm_completions = get_completions(
+        llm_completions = await get_completions(
             eval_df=df,
             num_examples=0,
             example_selection_method=ExampleSelectionMethod.NONE,

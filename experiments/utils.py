@@ -21,24 +21,22 @@ def _init_openai_client() -> None:
         )
 
 
-async def async_apply(df: pd.DataFrame, fn: Callable[[pd.Series], Coroutine]) -> pd.Series:
+async def async_apply(
+    df: pd.DataFrame,
+    fn: Callable[[pd.Series], Coroutine],
+    max_concurrent: int = 200,
+) -> pd.Series:
     """Apply a function to each row of a dataframe asynchronously."""
+    semaphore = asyncio.Semaphore(max_concurrent)
+
+    async def wrapper(*args, **kwargs):
+        async with semaphore:
+            return await fn(*args, **kwargs)
+
     new_col = await atqdm.gather(
-        *(fn(row) for ndx, row in df.iterrows())
+        *(wrapper(row) for ndx, row in df.iterrows())
     )
     return new_col
-
-
-# def async_apply(df: pd.DataFrame, fn: Callable[[pd.Series], Coroutine]) -> pd.Series:
-#     try:
-#         loop = asyncio.get_event_loop()
-#     except RuntimeError:
-#         loop = None
-#
-#     if loop is not None and loop.is_running():
-#         return loop.run_until_complete(_async_apply(df, fn))
-#     else:
-#         return asyncio.run(_async_apply(df, fn))
 
 
 def get_embedding_apply_fn(
