@@ -3,7 +3,9 @@ from typing import Any, Callable, Coroutine, Dict, List
 
 from dotenv import load_dotenv
 from httpx import Timeout
+from langchain.utils.math import cosine_similarity
 import openai
+import numpy as np
 import pandas as pd
 from tenacity import retry, wait_exponential
 import tiktoken
@@ -18,7 +20,7 @@ def _init_openai_client() -> None:
     if async_openai_client is None:
         load_dotenv()
         async_openai_client = openai.AsyncOpenAI(
-            timeout=Timeout(120, connect=5),
+            timeout=Timeout(90, connect=5),
         )
 
 
@@ -130,3 +132,53 @@ def cost_for_messages(
     """Calculate the cost of a list of chat messages."""
     num_tokens = num_tokens_for_messages(messages, model)
     return num_tokens * MODEL_INPUT_PRICING_DICT[model]
+
+
+def maximal_marginal_relevance(
+    query_embedding: np.ndarray | None = None,
+    embeddings: np.ndarray | None = None,
+    all_computed_sims: np.ndarray | None = None,
+    query_sims: np.ndarray | None = None,
+    lambda_mult: float = 0.5,
+    k: int = 4,
+) -> List[int]:
+    """Calculate maximal marginal relevance."""
+    # Validate inputs
+    if query_embedding is None and query_sims is None:
+        raise ValueError(
+            "Either `query_embedding` or `query_sims` must be supplied"
+        )
+    if embeddings is None and all_computed_sims is None:
+        raise ValueError(
+            "Either `embeddings` or `all_computed_sims` must be supplied"
+        )
+
+    if query_sims is None:
+        query_sims = cosine_similarity(query_embedding, embeddings)
+
+    if all_computed_sims is None:
+        all_computed_sims = cosine_similarity(embeddings, embeddings)
+
+    most_similar_ndxs = [
+        int(np.argmax(query_sims))
+    ]
+
+    while len(most_similar_ndxs) < min(k, all_computed_sims.shape[0] - 1):
+        best_score = -np.inf
+        idx_to_add = -1
+        similarity_to_selected = all_computed_sims[most_similar_ndxs]
+
+        for i, query_score in enumerate(query_sims):
+            if i in most_similar_ndxs:
+                continue
+            # Find the highest similarity to any of the selected examples
+            redundant_score = similarity_to_selected[:, i].max()
+            equation_score = (
+                lambda_mult * query_score - (1 - lambda_mult) * redundant_score
+            )
+            if equation_score > best_score:
+                best_score = equation_score
+                idx_to_add = i
+        most_similar_ndxs.append(idx_to_add)
+
+    return most_similar_ndxs

@@ -3,10 +3,9 @@ import asyncio
 from hashlib import md5
 from itertools import product
 from enum import Enum
-from typing import Any, Dict, List, Type
+from typing import Any, Dict, List, Type, cast
 
 from langchain.utils.math import cosine_similarity
-from langchain.vectorstores.utils import maximal_marginal_relevance
 import numpy as np
 import pandas as pd
 from pydantic import BaseModel
@@ -17,6 +16,7 @@ from experiments.utils import (
     get_embedding_apply_fn,
     get_inference_apply_fn,
     cost_for_messages,
+    maximal_marginal_relevance,
 )
 from momentum.response_example import InContextExample
 
@@ -38,6 +38,7 @@ class ExperimentConfig(BaseModel):
     """Parameters for running an experiment"""
     num_examples: int
     example_selection_method: ExampleSelectionMethod
+    model: str
     seed: int
 
     @property
@@ -58,6 +59,7 @@ class ExperimentConfig(BaseModel):
                 "num_examples": self.num_examples,
                 "method": self.example_selection_method.value,
                 "seed": self.seed,
+                "model": self.model,
             }.items()
         )
         return "__".join([
@@ -69,6 +71,7 @@ class ExperimentConfig(BaseModel):
         self,
         row: pd.Series,
         df: pd.DataFrame,
+        all_computed_sims: np.ndarray | None = None,
     ) -> pd.DataFrame | None:
         """Selects examples from the provided dataframe for the row"""
         if self.example_selection_method == ExampleSelectionMethod.NONE or self.num_examples == 0:
@@ -77,26 +80,41 @@ class ExperimentConfig(BaseModel):
         # Filter to just the correct examples
         df = df[df[EXAMPLE_CORRECT_COL]]
 
+        if all_computed_sims is not None:
+            # Row index must be ints corresponding to the index of the similarity matrix
+            assert type(row.name) is int
+
         if self.example_selection_method == ExampleSelectionMethod.RANDOM:
             return self._df_to_icl_examples(
                 df.sample(n=self.num_examples)
             )
 
         elif self.example_selection_method == ExampleSelectionMethod.MOMENTUM_MMR:
-            best_indices = maximal_marginal_relevance(
-                query_embedding=np.array(row[EMBEDDING_COL]),
-                embedding_list=df[EMBEDDING_COL].tolist(),
-                k=self.num_examples,
-            )
+            if all_computed_sims is None:
+                best_indices = maximal_marginal_relevance(
+                    query_embedding=np.array(row[EMBEDDING_COL]),
+                    embeddings=np.array(df[EMBEDDING_COL].tolist()),
+                    k=self.num_examples,
+                )
+            else:
+                best_indices = maximal_marginal_relevance(
+                    query_sims=all_computed_sims[row.name, df.index],
+                    all_computed_sims=all_computed_sims[df.index][:, df.index],  # Only consider examples in df
+                    k=self.num_examples,
+                )
+
             return self._df_to_icl_examples(
                 df.iloc[best_indices]
             )
 
         elif self.example_selection_method == ExampleSelectionMethod.MOMENTUM_SIM:
-            # Can assume the current row is not in df
-            sims = cosine_similarity([row[EMBEDDING_COL]], df[EMBEDDING_COL].tolist())
+            if all_computed_sims is not None:
+                sims = all_computed_sims[row.name, df.index]
+            else:
+                sims = cosine_similarity([row[EMBEDDING_COL]], df[EMBEDDING_COL].tolist())[0]
+
             # Get indices of num_examples most similar examples
-            closest_indices = sims[0].argsort()[::-1][:self.num_examples]
+            closest_indices = sims.argsort()[::-1][:self.num_examples]
             return self._df_to_icl_examples(
                 df.iloc[closest_indices]
             )
@@ -164,6 +182,7 @@ class BaseTask(abc.ABC):
         examples_df: pd.DataFrame | None = None,
         artifact_store: ArtifactStore | None = None,
         artifact_key_prefix: str = "",
+        all_computed_sims: np.ndarray | None = None,
     ):
         self.eval_df = eval_df
         self.exp_config = exp_config
@@ -171,6 +190,7 @@ class BaseTask(abc.ABC):
         self.examples_df = examples_df if examples_df is not None else eval_df.copy()
         self.artifact_store = artifact_store or ArtifactDictStore()
         self.artifact_key_prefix = artifact_key_prefix
+        self.all_computed_sims = all_computed_sims
 
     async def arun_eval(self, populate_examples: bool = False) -> float:
         """Runs the experiment asynchronously and returns the accuracy"""
@@ -196,7 +216,7 @@ class BaseTask(abc.ABC):
         # Making some aggressive assumptions here
         # TODO: Make these assumptions configurable
         avg_tokens_output_per_row = 70
-        llm_output_cost = MODEL_OUTPUT_PRICING_DICT["gpt-3.5-turbo-1106"] * avg_tokens_output_per_row
+        llm_output_cost = MODEL_OUTPUT_PRICING_DICT[self.exp_config.model] * avg_tokens_output_per_row
 
         return (llm_input_costs + llm_output_cost).sum()
 
@@ -282,6 +302,7 @@ class BaseTask(abc.ABC):
                     num_examples=0,
                     example_selection_method=ExampleSelectionMethod.NONE,
                     seed=self.exp_config.seed,
+                    model=self.exp_config.model,
                 )
             )
             df[EXAMPLE_CONTENT_COL] = llm_completions
@@ -319,16 +340,21 @@ class BaseTask(abc.ABC):
             examples = exp_config.select_examples(
                 row=row,
                 df=filtered_examples_df,
+                all_computed_sims=self.all_computed_sims,
             )
             return self.create_prompt_msgs(row, examples=examples)
 
         if estimate_costs:
             # TODO: Escalate model name here as an experiment config param
             async def apply_fn(row: pd.Series) -> float:
-                return cost_for_messages(create_prompt_fn(row))
+                return cost_for_messages(
+                    create_prompt_fn(row),
+                    model=self.exp_config.model,
+                )
         else:
             apply_fn = get_inference_apply_fn(
                 create_prompt_fn=create_prompt_fn,
+                model=self.exp_config.model,
             )
         return await async_apply(self.eval_df, apply_fn)
 
@@ -415,6 +441,10 @@ async def arun_experiment(
     if experiment_configs is None:
         experiment_configs = create_experiment_list_from_grid(param_grid)
 
+    if len({exp_config.model for exp_config in experiment_configs}) > 1:
+        # TODO: Figure out what to do with multiple models
+        raise NotImplementedError("Cannot currently run experiments with multiple models")
+
     all_results: List[float] = []
     artifact_store = ArtifactDictStore()
     task_cls = BaseTask.task_registry[task_name]
@@ -431,15 +461,28 @@ async def arun_experiment(
             num_examples=0,
             example_selection_method=ExampleSelectionMethod.NONE,
             seed=123,
+            model=experiment_configs[0].model,
         ),
         examples_df=examples_df,
         artifact_store=artifact_store,
         artifact_key_prefix="BASE_ZERO_SHOT_RUN",
     )
-    # TODO: Make this not access a protected class member
-    if not simple_task._examples_df_has_required_cols() and not estimate_costs:
+    # TODO: Account for if this will overwrite existing columns & run unnecessarily
+    if not estimate_costs:
         log_fn("Populating examples...")
         await simple_task.populate_examples(examples_df)
+
+    # Compute all similarities upfront if needed
+    if any(exp_config.needs_embedding for exp_config in experiment_configs):
+        log_fn("Computing similarities...")
+        all_computed_sims = cosine_similarity(
+            # TODO: Fix this too
+            # eval_df[EMBEDDING_COL].tolist(),
+            examples_df[EMBEDDING_COL].tolist(),
+            examples_df[EMBEDDING_COL].tolist(),
+        )
+    else:
+        all_computed_sims = None
 
     # TODO: Look into making this loop async?
     for experiment_config in experiment_configs:
@@ -450,6 +493,7 @@ async def arun_experiment(
             examples_df=examples_df,
             artifact_store=artifact_store,
             artifact_key_prefix=experiment_config.run_name,
+            all_computed_sims=all_computed_sims,
         )
         if estimate_costs:
             all_results.append(
@@ -459,6 +503,14 @@ async def arun_experiment(
             all_results.append(
                 await task.arun_eval(populate_examples=False)
             )
+
+    if not estimate_costs:
+        # TODO: This is hacky please fix
+        # Adding a result for the zero shot case
+        simple_llm_completions = examples_df[EXAMPLE_CONTENT_COL]
+        simple_task.existing_llm_completions = simple_llm_completions
+        all_results.insert(0, await simple_task.arun_eval())
+        experiment_configs.insert(0, simple_task.exp_config)
 
     return ExperimentResults(
         exp_configs=experiment_configs,
